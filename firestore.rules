@@ -1,0 +1,214 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: /users/{uid}
+    // Fields:
+    //   - uid: string (required)
+    //   - email: string (required, email format)
+    //   - displayName: string (optional)
+    //   - photoURL: string (optional)
+    //   - currency: string (optional, enum: ["INR", "USD", "EUR", "GBP"])
+    //   - createdAt: timestamp (required)
+    //
+    // Collection: /transactions/{transactionId}
+    // Fields:
+    //   - id: string (required)
+    //   - uid: string (required)
+    //   - amount: number (required, positive)
+    //   - category: string (required)
+    //   - date: timestamp (required)
+    //   - description: string (optional)
+    //   - type: string (required, enum: ["income", "expense"])
+    //   - accountId: string (required)
+    //   - receiptUrl: string (optional)
+    //   - isRecurring: bool (optional)
+    //   - recurringInterval: string (optional, enum: ["daily", "weekly", "monthly", "yearly"])
+    //   - createdAt: timestamp (required)
+    //
+    // Collection: /accounts/{accountId}
+    // Fields:
+    //   - id: string (required)
+    //   - uid: string (required)
+    //   - name: string (required)
+    //   - type: string (required, enum: ["cash", "bank", "upi"])
+    //   - balance: number (required)
+    //   - createdAt: timestamp (required)
+    //
+    // Collection: /budgets/{budgetId}
+    // Fields:
+    //   - id: string (required)
+    //   - uid: string (required)
+    //   - category: string (required)
+    //   - amount: number (required, positive)
+    //   - month: int (required, 1-12)
+    //   - year: int (required)
+    //   - createdAt: timestamp (required)
+    //
+    // Collection: /goals/{goalId}
+    // Fields:
+    //   - id: string (required)
+    //   - uid: string (required)
+    //   - name: string (required)
+    //   - targetAmount: number (required, positive)
+    //   - currentAmount: number (required, non-negative)
+    //   - deadline: timestamp (optional)
+    //   - createdAt: timestamp (required)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isDocOwner() {
+      return isAuthenticated() && request.auth.uid == resource.data.uid;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (
+          (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+           get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin') ||
+          (request.auth.token.email == "dhamiputtar2009@gmail.com" && request.auth.token.email_verified == true)
+        );
+    }
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    function isValidEmail(email) {
+      return email is string && email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function isValidUrl(url) {
+      return url is string && (url.matches("^https://.*") || url.matches("^http://.*"));
+    }
+
+    function isRecent(time) {
+      return time is timestamp && 
+             time <= request.time && 
+             time > request.time - duration.value(10, 'm');
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    function isValidUser(data) {
+      return hasRequiredFields(['uid', 'email', 'createdAt']) &&
+             data.uid == request.auth.uid &&
+             isValidEmail(data.email) &&
+             (data.displayName == null || (data.displayName is string && data.displayName.size() < 100)) &&
+             (data.photoURL == null || data.photoURL == "" || isValidUrl(data.photoURL)) &&
+             (data.currency == null || data.currency in ["INR", "USD", "EUR", "GBP"]);
+    }
+
+    function isValidTransaction(data) {
+      return hasRequiredFields(['uid', 'amount', 'category', 'date', 'type', 'accountId', 'createdAt']) &&
+             data.uid == request.auth.uid &&
+             data.amount is number && data.amount > 0 &&
+             data.category is string && data.category.size() > 0 && data.category.size() < 100 &&
+             data.type in ["income", "expense"] &&
+             data.accountId is string &&
+             (data.description == null || data.description == "" || (data.description is string && data.description.size() < 1000)) &&
+             (data.receiptUrl == null || data.receiptUrl == "" || isValidUrl(data.receiptUrl)) &&
+             (data.isRecurring == null || data.isRecurring is bool) &&
+             (data.recurringInterval == null || data.recurringInterval == "" || data.recurringInterval in ["daily", "weekly", "monthly", "yearly"]);
+    }
+
+    function isValidAccount(data) {
+      return hasRequiredFields(['uid', 'name', 'type', 'balance', 'createdAt']) &&
+             data.uid == request.auth.uid &&
+             data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             data.type in ["cash", "bank", "upi"] &&
+             data.balance is number;
+    }
+
+    function isValidBudget(data) {
+      return hasRequiredFields(['uid', 'category', 'amount', 'month', 'year', 'createdAt']) &&
+             data.uid == request.auth.uid &&
+             data.category is string &&
+             data.amount is number && data.amount >= 0 &&
+             data.month is int && data.month >= 0 && data.month <= 11 &&
+             data.year is int;
+    }
+
+    function isValidGoal(data) {
+      return hasRequiredFields(['uid', 'name', 'targetAmount', 'currentAmount', 'createdAt']) &&
+             data.uid == request.auth.uid &&
+             data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             data.targetAmount is number && data.targetAmount > 0 &&
+             data.currentAmount is number && data.currentAmount >= 0 &&
+             (data.deadline == null || data.deadline is timestamp);
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{uid} {
+      allow read: if isOwner(uid) || isAdmin();
+      allow create: if (isOwner(uid) && isValidUser(request.resource.data) && isRecent(request.resource.data.createdAt)) || isAdmin();
+      allow update: if (isOwner(uid) && isValidUser(request.resource.data) && 
+                    request.resource.data.uid == resource.data.uid &&
+                    request.resource.data.createdAt == resource.data.createdAt &&
+                    (request.resource.data.role == resource.data.role || isAdmin())) || isAdmin();
+    }
+
+    match /transactions/{transactionId} {
+      allow read: if isDocOwner() || isAdmin();
+      allow create: if (isAuthenticated() && isValidTransaction(request.resource.data) && isRecent(request.resource.data.createdAt)) || isAdmin();
+      allow update: if (isDocOwner() && isValidTransaction(request.resource.data) && 
+                    request.resource.data.uid == resource.data.uid &&
+                    request.resource.data.createdAt == resource.data.createdAt) || isAdmin();
+      allow delete: if isDocOwner() || isAdmin();
+    }
+
+    match /accounts/{accountId} {
+      allow read: if isDocOwner() || isAdmin();
+      allow create: if (isAuthenticated() && isValidAccount(request.resource.data) && isRecent(request.resource.data.createdAt)) || isAdmin();
+      allow update: if (isDocOwner() && isValidAccount(request.resource.data) && 
+                    request.resource.data.uid == resource.data.uid &&
+                    request.resource.data.createdAt == resource.data.createdAt) || isAdmin();
+      allow delete: if isDocOwner() || isAdmin();
+    }
+
+    match /budgets/{budgetId} {
+      allow read: if isDocOwner() || isAdmin();
+      allow create: if (isAuthenticated() && isValidBudget(request.resource.data) && isRecent(request.resource.data.createdAt)) || isAdmin();
+      allow update: if (isDocOwner() && isValidBudget(request.resource.data) && 
+                    request.resource.data.uid == resource.data.uid &&
+                    request.resource.data.createdAt == resource.data.createdAt) || isAdmin();
+      allow delete: if isDocOwner() || isAdmin();
+    }
+
+    match /goals/{goalId} {
+      allow read: if isDocOwner() || isAdmin();
+      allow create: if (isAuthenticated() && isValidGoal(request.resource.data) && isRecent(request.resource.data.createdAt)) || isAdmin();
+      allow update: if (isDocOwner() && isValidGoal(request.resource.data) && 
+                    request.resource.data.uid == resource.data.uid &&
+                    request.resource.data.createdAt == resource.data.createdAt) || isAdmin();
+      allow delete: if isDocOwner() || isAdmin();
+    }
+
+    match /test/connection {
+      allow read: if true;
+    }
+  }
+}
